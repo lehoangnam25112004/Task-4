@@ -36,9 +36,10 @@ public sealed class WbsService(ApplicationDbContext dbContext) : IWbsService
         "Materials Staff"
     ];
 
-    public async Task<int?> GetFirstVisibleProjectIdAsync(
+    public async Task<WbsOperationResult<IReadOnlyList<WbsProjectTree>>> GetVisibleProjectTreesAsync(
         string userId,
         IReadOnlyCollection<string> roles,
+        string? search,
         CancellationToken cancellationToken = default)
     {
         if (!HasKnownRole(roles) ||
@@ -46,7 +47,7 @@ public sealed class WbsService(ApplicationDbContext dbContext) : IWbsService
                 user => user.Id == userId && user.IsActive,
                 cancellationToken))
         {
-            return null;
+            return WbsOperationResult<IReadOnlyList<WbsProjectTree>>.Forbidden();
         }
 
         var projects = dbContext.Projects
@@ -76,7 +77,54 @@ public sealed class WbsService(ApplicationDbContext dbContext) : IWbsService
                 .ToList();
         }
 
-        return candidates.Select(project => (int?)project.Id).FirstOrDefault();
+        var term = search?.Trim();
+        var trees = new List<WbsProjectTree>();
+        foreach (var candidate in candidates)
+        {
+            var result = await GetProjectTreeAsync(candidate.Id, userId, roles, cancellationToken: cancellationToken);
+            if (!result.Succeeded)
+            {
+                return CopyFailure<WbsProjectTree, IReadOnlyList<WbsProjectTree>>(result);
+            }
+
+            var tree = result.Value!;
+            if (string.IsNullOrEmpty(term) ||
+                tree.Project.ProjectCode.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+                tree.Project.Name.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+                tree.Phases.Any(phase => MatchesItemSearch(phase.RootItems, term)))
+            {
+                trees.Add(tree);
+            }
+        }
+
+        return WbsOperationResult<IReadOnlyList<WbsProjectTree>>.Success(trees);
+    }
+
+    private static bool MatchesItemSearch(IEnumerable<WbsItemTree> items, string term) =>
+        items.Any(node =>
+            node.Item.WbsCode.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+            node.Item.Name.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+            MatchesItemSearch(node.Children, term));
+
+    public async Task<WbsOperationResult<WbsProjectTree>> GetProjectTreeForStructureEditAsync(
+        int projectId,
+        string userId,
+        IReadOnlyCollection<string> roles,
+        CancellationToken cancellationToken = default)
+    {
+        var access = await AuthorizeProjectAsync(
+            projectId, userId, roles, WbsPermission.ManageStructure, cancellationToken);
+        if (!access.Succeeded)
+        {
+            return CopyFailure<Project, WbsProjectTree>(access);
+        }
+
+        if (IsProjectReadOnly(access.Value!))
+        {
+            return WbsOperationResult<WbsProjectTree>.Forbidden();
+        }
+
+        return await GetProjectTreeAsync(projectId, userId, roles, cancellationToken: cancellationToken);
     }
 
     public async Task<WbsOperationResult<WbsProjectTree>> GetProjectTreeAsync(

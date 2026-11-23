@@ -17,6 +17,7 @@ public class WbsController(
     public async Task<IActionResult> Index(
         int? projectId,
         bool includeArchived,
+        string? search,
         CancellationToken cancellationToken)
     {
         var user = await userManager.GetUserAsync(User);
@@ -28,13 +29,21 @@ public class WbsController(
         var roles = CurrentRoles();
         if (!projectId.HasValue)
         {
-            var firstProjectId = await wbsService.GetFirstVisibleProjectIdAsync(
+            var projects = await wbsService.GetVisibleProjectTreesAsync(
                 user.Id,
                 roles,
+                search,
                 cancellationToken);
-            return firstProjectId.HasValue
-                ? RedirectToAction(nameof(Index), new { projectId = firstProjectId, includeArchived })
-                : RedirectToAction("Index", "Projects");
+            if (!projects.Succeeded)
+            {
+                return Failure(projects);
+            }
+
+            return View("Projects", new WbsProjectListViewModel
+            {
+                Projects = projects.Value!,
+                Search = search?.Trim()
+            });
         }
 
         var result = await wbsService.GetProjectTreeAsync(
@@ -49,17 +58,21 @@ public class WbsController(
         }
 
         var tree = result.Value!;
-        var canManageStructure = !tree.IsReadOnly && HasAnyRole(roles, "Project Director", "Project Manager");
-        var canUpdateStatus = !tree.IsReadOnly && HasAnyRole(
+        var canManageStructure = !tree.IsReadOnly &&
+            !HasAnyRole(roles, RoleNames.Admin) &&
+            HasAnyRole(roles, "Project Director", "Project Manager");
+        var canUpdateStatus = !tree.IsReadOnly &&
+            !HasAnyRole(roles, RoleNames.Admin) && HasAnyRole(
             roles,
             "Project Director",
             "Project Manager",
             "Site Manager");
-        var canArchiveRestore = !tree.IsReadOnly && HasAnyRole(
+        var canViewArchived = HasAnyRole(
             roles,
             RoleNames.Admin,
             "Project Director",
             "Project Manager");
+        var canArchiveRestore = !tree.IsReadOnly && canViewArchived;
 
         return View(new WbsIndexViewModel
         {
@@ -67,6 +80,7 @@ public class WbsController(
             IncludeArchived = includeArchived,
             CanManageStructure = canManageStructure,
             CanUpdateStatus = canUpdateStatus,
+            CanViewArchived = canViewArchived,
             CanArchiveRestore = canArchiveRestore
         });
     }
@@ -166,15 +180,26 @@ public class WbsController(
             return BadRequest();
         }
 
-        if (!ModelState.IsValid)
-        {
-            return View(model);
-        }
-
         var user = await userManager.GetUserAsync(User);
         if (user is null)
         {
             return Challenge();
+        }
+
+        var current = await wbsService.GetPhaseForEditAsync(id, user.Id, CurrentRoles(), cancellationToken);
+        if (!current.Succeeded)
+        {
+            return Failure(current);
+        }
+
+        if (model.ProjectId != current.Value!.ProjectId)
+        {
+            return BadRequest();
+        }
+
+        if (!ModelState.IsValid)
+        {
+            return View(model);
         }
 
         var result = await wbsService.UpdatePhaseAsync(
@@ -308,16 +333,27 @@ public class WbsController(
             return BadRequest();
         }
 
-        if (!ModelState.IsValid)
-        {
-            var loadFailure = await LoadItemOptionsAsync(model.ProjectId, cancellationToken);
-            return loadFailure ?? View(model);
-        }
-
         var user = await userManager.GetUserAsync(User);
         if (user is null)
         {
             return Challenge();
+        }
+
+        var current = await wbsService.GetWorkItemForEditAsync(id, user.Id, CurrentRoles(), cancellationToken);
+        if (!current.Succeeded)
+        {
+            return Failure(current);
+        }
+
+        if (model.ProjectId != current.Value!.ProjectId)
+        {
+            return BadRequest();
+        }
+
+        if (!ModelState.IsValid)
+        {
+            var loadFailure = await LoadItemOptionsAsync(current.Value.ProjectId, cancellationToken);
+            return loadFailure ?? View(model);
         }
 
         var result = await wbsService.UpdateWorkItemAsync(
@@ -494,22 +530,17 @@ public class WbsController(
             return Challenge();
         }
 
-        var result = await wbsService.GetProjectTreeAsync(
+        var result = await wbsService.GetProjectTreeForStructureEditAsync(
             projectId,
             user.Id,
             CurrentRoles(),
-            cancellationToken: cancellationToken);
+            cancellationToken);
         if (!result.Succeeded)
         {
             return Failure(result);
         }
 
-        if (result.Value!.IsReadOnly)
-        {
-            return Forbid();
-        }
-
-        ViewBag.Phases = result.Value.Phases.Select(phase => phase.Phase).ToList();
+        ViewBag.Phases = result.Value!.Phases.Select(phase => phase.Phase).ToList();
         ViewBag.WorkItems = Flatten(result.Value.Phases.SelectMany(phase => phase.RootItems)).ToList();
         return null;
     }
@@ -524,17 +555,11 @@ public class WbsController(
             return WbsOperationResult<WbsProjectTree>.Forbidden();
         }
 
-        var result = await wbsService.GetProjectTreeAsync(
+        return await wbsService.GetProjectTreeForStructureEditAsync(
             projectId,
             user.Id,
             CurrentRoles(),
-            cancellationToken: cancellationToken);
-        if (result.Succeeded && result.Value!.IsReadOnly)
-        {
-            return WbsOperationResult<WbsProjectTree>.Forbidden();
-        }
-
-        return result;
+            cancellationToken);
     }
 
     private async Task<IActionResult> ReturnWorkItemFailureAsync(

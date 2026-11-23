@@ -1,0 +1,88 @@
+@model ConstructionProjectManagement.ViewModels.WbsProjectListViewModel
+@using ConstructionProjectManagement.Models
+@using ConstructionProjectManagement.ViewModels
+@{
+    ViewData["Title"] = "Cấu trúc phân chia công việc (WBS)";
+}
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h1 class="h3 mb-0">Cấu trúc phân chia công việc (WBS)</h1>
+</div>
+
+<form asp-action="Index" method="get" class="card card-body mb-3">
+    <div class="row g-2 align-items-end">
+        <div class="col-md">
+            <label for="search" class="form-label">Tìm kiếm dự án hoặc hạng mục WBS</label>
+            <input id="search" name="search" value="@Model.Search" class="form-control"
+                   placeholder="Nhập mã hoặc tên dự án, mã hoặc tên WBS" />
+        </div>
+        <div class="col-md-auto d-flex gap-2">
+            <button type="submit" class="btn btn-primary">Tìm kiếm</button>
+            <a asp-action="Index" class="btn btn-outline-secondary">Đặt lại</a>
+        </div>
+    </div>
+</form>
+
+@if (Model.Projects.Count == 0)
+{
+    <div class="card card-body text-muted">Không có dự án WBS phù hợp trong phạm vi truy cập.</div>
+}
+
+@foreach (var tree in Model.Projects)
+{
+    <section class="card mb-3">
+        <div class="card-body">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                <div>
+                    <h2 class="h5 mb-2">@tree.Project.ProjectCode - @tree.Project.Name</h2>
+                    <span class="badge text-bg-primary">
+                        @(tree.Project.Status switch
+                        {
+                            ProjectStatus.Draft => "Nháp",
+                            ProjectStatus.Planning => "Lập kế hoạch",
+                            ProjectStatus.InProgress => "Đang thực hiện",
+                            ProjectStatus.OnHold => "Tạm dừng",
+                            ProjectStatus.Completed => "Hoàn thành",
+                            ProjectStatus.Cancelled => "Đã hủy",
+                            _ => tree.Project.Status.ToString()
+                        })
+                    </span>
+                    @if (tree.IsReadOnly)
+                    {
+                        <span class="badge text-bg-secondary">Chỉ đọc</span>
+                    }
+                </div>
+                <a class="btn btn-sm btn-outline-primary" asp-action="Index"
+                   asp-route-projectId="@tree.Project.Id">Chi tiết</a>
+            </div>
+
+            @if (tree.Phases.Count == 0)
+            {
+                <p class="text-muted mb-0 mt-3">Dự án chưa có giai đoạn WBS hoạt động.</p>
+            }
+            else
+            {
+                @foreach (var phase in tree.Phases)
+                {
+                    <div class="border-top mt-3 pt-3">
+                        <strong>Giai đoạn @phase.Phase.SequenceOrder: @phase.Phase.Name</strong>
+                        <span class="badge text-bg-secondary ms-1">@WbsStatusLabels.For(phase.Phase.Status)</span>
+                        @if (phase.RootItems.Count == 0)
+                        {
+                            <p class="small text-muted mb-0 mt-2">Chưa có hạng mục hoạt động.</p>
+                        }
+                        else
+                        {
+                            <ul class="list-unstyled mb-0 mt-2">
+                                @foreach (var node in phase.RootItems)
+                                {
+                                    @await Html.PartialAsync("_WbsPreviewTree", node)
+                                }
+                            </ul>
+                        }
+                    </div>
+                }
+            }
+        </div>
+    </section>
+}

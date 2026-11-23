@@ -1,0 +1,17 @@
+@model ConstructionProjectManagement.Services.WbsItemTree
+@using ConstructionProjectManagement.ViewModels
+
+<li class="py-1">
+    <span class="badge text-bg-light border">@Model.Item.WbsCode</span>
+    <span class="ms-1">@Model.Item.Name</span>
+    <span class="small text-muted ms-1">Cấp @Model.Depth · @WbsStatusLabels.For(Model.Item.Status)</span>
+    @if (Model.Children.Count > 0)
+    {
+        <ul class="list-unstyled border-start ms-2 ps-3 mt-1">
+            @foreach (var child in Model.Children)
+            {
+                @await Html.PartialAsync("_WbsPreviewTree", child)
+            }
+        </ul>
+    }
+</li>

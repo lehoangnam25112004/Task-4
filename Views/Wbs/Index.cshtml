@@ -22,6 +22,7 @@
     <div>
         <h1 class="h3 mb-1">Cấu trúc WBS</h1>
         <p class="text-muted mb-0">@Model.Tree.Project.ProjectCode - @Model.Tree.Project.Name</p>
+        <a asp-action="Index" class="small">Quay lại danh sách dự án WBS</a>
         @if (Model.Tree.IsReadOnly)
         {
             <span class="badge text-bg-secondary mt-2">Dự án chỉ đọc</span>
@@ -31,12 +32,12 @@
     {
         <div>
             <a class="btn btn-outline-primary" asp-action="CreatePhase" asp-route-projectId="@Model.Tree.Project.Id">Thêm giai đoạn</a>
-            <a class="btn btn-primary" asp-action="CreateItem" asp-route-projectId="@Model.Tree.Project.Id">Thêm hạng mục</a>
+            <a class="btn btn-primary" asp-action="CreateItem" asp-route-projectId="@Model.Tree.Project.Id">Thêm hạng mục WBS</a>
         </div>
     }
 </div>
 
-@if (Model.CanArchiveRestore)
+@if (Model.CanViewArchived)
 {
     <form asp-action="Index" method="get" class="form-check form-switch mb-3">
         <input type="hidden" name="projectId" value="@Model.Tree.Project.Id" />

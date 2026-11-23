@@ -5,9 +5,10 @@ namespace ConstructionProjectManagement.Services.Interfaces;
 
 public interface IWbsService
 {
-    Task<int?> GetFirstVisibleProjectIdAsync(
+    Task<WbsOperationResult<IReadOnlyList<WbsProjectTree>>> GetVisibleProjectTreesAsync(
         string userId,
         IReadOnlyCollection<string> roles,
+        string? search,
         CancellationToken cancellationToken = default);
 
     Task<WbsOperationResult<WbsProjectTree>> GetProjectTreeAsync(
@@ -15,6 +16,12 @@ public interface IWbsService
         string userId,
         IReadOnlyCollection<string> roles,
         bool includeArchived = false,
+        CancellationToken cancellationToken = default);
+
+    Task<WbsOperationResult<WbsProjectTree>> GetProjectTreeForStructureEditAsync(
+        int projectId,
+        string userId,
+        IReadOnlyCollection<string> roles,
         CancellationToken cancellationToken = default);
 
     Task<WbsOperationResult<ProjectPhase>> GetPhaseForEditAsync(

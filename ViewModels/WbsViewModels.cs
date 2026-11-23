@@ -4,6 +4,13 @@ using ConstructionProjectManagement.Services;
 
 namespace ConstructionProjectManagement.ViewModels;
 
+public sealed class WbsProjectListViewModel
+{
+    public required IReadOnlyList<WbsProjectTree> Projects { get; init; }
+
+    public string? Search { get; init; }
+}
+
 public sealed class WbsIndexViewModel
 {
     public required WbsProjectTree Tree { get; init; }
@@ -13,6 +20,8 @@ public sealed class WbsIndexViewModel
     public bool CanManageStructure { get; init; }
 
     public bool CanUpdateStatus { get; init; }
+
+    public bool CanViewArchived { get; init; }
 
     public bool CanArchiveRestore { get; init; }
 }

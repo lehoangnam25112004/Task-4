@@ -1,10 +1,20 @@
+using System.Security.Claims;
+using ConstructionProjectManagement.Controllers;
 using ConstructionProjectManagement.Data;
 using ConstructionProjectManagement.Models;
 using ConstructionProjectManagement.Services;
+using ConstructionProjectManagement.ViewModels;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using TaskEntity = ConstructionProjectManagement.Models.Task;
 using Task = System.Threading.Tasks.Task;
 
@@ -189,6 +199,73 @@ public sealed class WbsServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ProjectList_SearchesProjectAndNestedActiveItemsInTreeOrder()
+    {
+        var (user, project, phase) = await CreateMemberAndPhaseAsync("Project Manager");
+        project.ProjectCode = "PROJECT-SEARCH";
+        project.Name = "Công trình tìm kiếm";
+        phase.SequenceOrder = 2;
+        var earlierPhase = await AddPhaseAsync(project.Id, "Giai đoạn trước");
+        earlierPhase.SequenceOrder = 1;
+        var laterRoot = await AddItemAsync(project.Id, phase.Id, "WBS-LATER", "Mục sau", sequence: 2);
+        var firstRoot = await AddItemAsync(project.Id, phase.Id, "WBS-FIRST", "Mục trước", sequence: 1);
+        var child = await AddItemAsync(project.Id, phase.Id, "WBS-FIRST.01", "Móng công trình", firstRoot.Id);
+        var hidden = await AddItemAsync(project.Id, phase.Id, "WBS-HIDDEN", "Mục lưu trữ");
+        await _db.SaveChangesAsync();
+        Assert.True((await _service.ArchiveWorkItemAsync(hidden.Id, user.Id, ["Project Manager"])).Succeeded);
+
+        foreach (var term in new[] { "project-search", "tìm kiếm", "wbs-first.01", "móng công trình" })
+        {
+            var result = await _service.GetVisibleProjectTreesAsync(user.Id, ["Project Manager"], term);
+            Assert.True(result.Succeeded, result.Error);
+            var tree = Assert.Single(result.Value!);
+            Assert.Equal(new[] { earlierPhase.Id, phase.Id }, tree.Phases.Select(item => item.Phase.Id));
+            Assert.Equal(new[] { firstRoot.Id, laterRoot.Id }, tree.Phases[1].RootItems.Select(item => item.Item.Id));
+            Assert.Equal(child.Id, Assert.Single(tree.Phases[1].RootItems[0].Children).Item.Id);
+        }
+
+        var hiddenSearch = await _service.GetVisibleProjectTreesAsync(user.Id, ["Project Manager"], "WBS-HIDDEN");
+        Assert.True(hiddenSearch.Succeeded);
+        Assert.Empty(hiddenSearch.Value!);
+    }
+
+    [Fact]
+    public async Task ProjectList_UsesWbsRolesMembershipAndClientOrganization()
+    {
+        var user = NewUser("wbs-list-user", "Khách hàng A");
+        _db.Users.Add(user);
+        var allowed = await AddProjectAsync("LIST-ALLOWED", "Khách hàng A");
+        var inactive = await AddProjectAsync("LIST-INACTIVE", "Khách hàng A");
+        var mismatch = await AddProjectAsync("LIST-MISMATCH", "Khách hàng B");
+        var archived = await AddProjectAsync("LIST-ARCHIVED", "Khách hàng A");
+        archived.IsArchived = true;
+        _db.ProjectMembers.AddRange(
+            new ProjectMember { ProjectId = allowed.Id, UserId = user.Id, IsActive = true },
+            new ProjectMember { ProjectId = inactive.Id, UserId = user.Id, IsActive = false },
+            new ProjectMember { ProjectId = mismatch.Id, UserId = user.Id, IsActive = true },
+            new ProjectMember { ProjectId = archived.Id, UserId = user.Id, IsActive = true });
+        await _db.SaveChangesAsync();
+
+        foreach (var role in RoleNames.All)
+        {
+            var result = await _service.GetVisibleProjectTreesAsync(user.Id, [role], null);
+            Assert.True(result.Succeeded, result.Error);
+            var ids = result.Value!.Select(tree => tree.Project.Id).ToArray();
+            Assert.Contains(allowed.Id, ids);
+            Assert.DoesNotContain(archived.Id, ids);
+            Assert.Equal(role == RoleNames.Admin, ids.Contains(inactive.Id));
+            Assert.Equal(role != "Client Representative", ids.Contains(mismatch.Id));
+        }
+
+        var unknown = await _service.GetVisibleProjectTreesAsync(user.Id, ["Unknown"], null);
+        Assert.Equal(WbsFailureKind.Forbidden, unknown.Failure);
+        user.IsActive = false;
+        await _db.SaveChangesAsync();
+        var inactiveUser = await _service.GetVisibleProjectTreesAsync(user.Id, [RoleNames.Admin], null);
+        Assert.Equal(WbsFailureKind.Forbidden, inactiveUser.Failure);
+    }
+
+    [Fact]
     public async Task AdminRole_DeniesBusinessEditsEvenWhenAnotherRoleIsPresent()
     {
         var user = NewUser("wbs-admin-multi-role");
@@ -212,6 +289,137 @@ public sealed class WbsServiceTests : IAsyncLifetime
         Assert.Equal(WbsFailureKind.Forbidden, create.Failure);
         Assert.Equal(WbsFailureKind.Forbidden, status.Failure);
         Assert.True(archive.Succeeded);
+    }
+
+    [Fact]
+    public async Task InvalidPhasePost_ChecksActualPhaseScopeUserAndProjectState()
+    {
+        var (user, project, phase) = await CreateMemberAndPhaseAsync("Project Manager");
+        var other = await AddProjectAsync("WBS-PHASE-OTHER");
+        var otherPhase = await AddPhaseAsync(other.Id, "Other phase");
+        var controller = CreateController(user, "Project Manager");
+        controller.ModelState.AddModelError("Name", "Invalid");
+        var model = new ProjectPhaseViewModel { Id = phase.Id, ProjectId = project.Id };
+
+        Assert.IsType<ViewResult>(await controller.EditPhase(phase.Id, model, default));
+        Assert.IsType<NotFoundResult>(await controller.EditPhase(
+            otherPhase.Id, new ProjectPhaseViewModel { Id = otherPhase.Id, ProjectId = project.Id }, default));
+        Assert.IsType<BadRequestResult>(await controller.EditPhase(
+            phase.Id, new ProjectPhaseViewModel { Id = phase.Id, ProjectId = other.Id }, default));
+
+        var member = await _db.ProjectMembers.SingleAsync(m => m.ProjectId == project.Id);
+        member.IsActive = false;
+        await _db.SaveChangesAsync();
+        Assert.IsType<NotFoundResult>(await controller.EditPhase(phase.Id, model, default));
+        member.IsActive = true;
+        user.IsActive = false;
+        await _db.SaveChangesAsync();
+        Assert.IsType<ForbidResult>(await controller.EditPhase(phase.Id, model, default));
+        user.IsActive = true;
+        project.Status = ProjectStatus.Completed;
+        await _db.SaveChangesAsync();
+        Assert.IsType<ForbidResult>(await controller.EditPhase(phase.Id, model, default));
+    }
+
+    [Fact]
+    public async Task InvalidItemPost_UsesActualItemInsteadOfSubmittedProject()
+    {
+        var (user, project, phase) = await CreateMemberAndPhaseAsync("Project Manager");
+        var item = await AddItemAsync(project.Id, phase.Id, "WBS-OWN", "Own item");
+        var other = await AddProjectAsync("WBS-ITEM-OTHER");
+        var otherPhase = await AddPhaseAsync(other.Id, "Other phase");
+        var otherItem = await AddItemAsync(other.Id, otherPhase.Id, "WBS-OTHER", "Other item");
+        var controller = CreateController(user, "Project Manager");
+        controller.ModelState.AddModelError("Name", "Invalid");
+        var model = new WorkItemViewModel { Id = item.Id, ProjectId = project.Id };
+
+        Assert.IsType<ViewResult>(await controller.EditItem(item.Id, model, default));
+        Assert.IsType<NotFoundResult>(await controller.EditItem(
+            otherItem.Id, new WorkItemViewModel { Id = otherItem.Id, ProjectId = project.Id }, default));
+        Assert.IsType<NotFoundResult>(await controller.EditItem(
+            int.MaxValue, new WorkItemViewModel { Id = int.MaxValue, ProjectId = project.Id }, default));
+        Assert.IsType<BadRequestResult>(await controller.EditItem(
+            item.Id, new WorkItemViewModel { Id = item.Id, ProjectId = other.Id }, default));
+
+        var member = await _db.ProjectMembers.SingleAsync(m => m.ProjectId == project.Id);
+        member.IsActive = false;
+        await _db.SaveChangesAsync();
+        Assert.IsType<NotFoundResult>(await controller.EditItem(item.Id, model, default));
+        member.IsActive = true;
+        user.IsActive = false;
+        await _db.SaveChangesAsync();
+        Assert.IsType<ForbidResult>(await controller.EditItem(item.Id, model, default));
+        user.IsActive = true;
+        project.Status = ProjectStatus.Cancelled;
+        await _db.SaveChangesAsync();
+        Assert.IsType<ForbidResult>(await controller.EditItem(item.Id, model, default));
+    }
+
+    [Fact]
+    public async Task InvalidEditPosts_EnforceClientOrganizationForMultipleRoles()
+    {
+        var (user, project, phase) = await CreateMemberAndPhaseAsync("Project Manager", "Client A");
+        var item = await AddItemAsync(project.Id, phase.Id, "WBS-CLIENT-EDIT", "Item");
+        user.OrganizationName = "Client B";
+        await _db.SaveChangesAsync();
+        var controller = CreateController(user, "Project Manager", "Client Representative");
+        controller.ModelState.AddModelError("Name", "Invalid");
+
+        Assert.IsType<NotFoundResult>(await controller.EditPhase(
+            phase.Id, new ProjectPhaseViewModel { Id = phase.Id, ProjectId = project.Id }, default));
+        Assert.IsType<NotFoundResult>(await controller.EditItem(
+            item.Id, new WorkItemViewModel { Id = item.Id, ProjectId = project.Id }, default));
+    }
+
+    [Fact]
+    public async Task CreateFormsAndStatusControls_RespectAdminPrecedence()
+    {
+        var (user, project, _) = await CreateMemberAndPhaseAsync("Project Manager");
+        var manager = CreateController(user, "Project Manager");
+        Assert.IsType<ViewResult>(await manager.CreatePhase(project.Id, default));
+        Assert.IsType<ViewResult>(await manager.CreateItem(project.Id, default));
+
+        var adminManager = CreateController(user, RoleNames.Admin, "Project Manager");
+        Assert.IsType<ForbidResult>(await adminManager.CreatePhase(project.Id, default));
+        Assert.IsType<ForbidResult>(await adminManager.CreateItem(project.Id, default));
+        var view = Assert.IsType<ViewResult>(await adminManager.Index(project.Id, false, null, default));
+        var model = Assert.IsType<WbsIndexViewModel>(view.Model);
+        Assert.False(model.CanManageStructure);
+        Assert.False(model.CanUpdateStatus);
+        Assert.True(model.CanViewArchived);
+        Assert.True(model.CanArchiveRestore);
+    }
+
+    [Theory]
+    [InlineData(ProjectStatus.Completed, false)]
+    [InlineData(ProjectStatus.Cancelled, false)]
+    [InlineData(ProjectStatus.InProgress, true)]
+    public async Task ReadOnlyProjects_AllowArchivedViewButNotWrite(ProjectStatus status, bool archived)
+    {
+        var (user, project, phase) = await CreateMemberAndPhaseAsync("Project Manager");
+        var item = await AddItemAsync(project.Id, phase.Id, "WBS-ARCHIVED-VIEW", "Archived");
+        Assert.True((await _service.ArchiveWorkItemAsync(item.Id, user.Id, ["Project Manager"])).Succeeded);
+        project.Status = status;
+        project.IsArchived = archived;
+        await _db.SaveChangesAsync();
+
+        foreach (var role in new[] { RoleNames.Admin, "Project Director", "Project Manager" })
+        {
+            var controller = CreateController(user, role);
+            var result = Assert.IsType<ViewResult>(await controller.Index(project.Id, true, null, default));
+            var model = Assert.IsType<WbsIndexViewModel>(result.Model);
+            Assert.True(model.CanViewArchived);
+            Assert.False(model.CanArchiveRestore);
+            Assert.False(model.CanManageStructure);
+            Assert.False(model.CanUpdateStatus);
+            Assert.True(Assert.Single(model.Tree.Phases.Single().RootItems).Item.IsArchived);
+            Assert.IsType<ForbidResult>(await controller.RestoreItem(item.Id, project.Id, default));
+        }
+
+        var site = CreateController(user, "Site Manager");
+        var siteView = Assert.IsType<ViewResult>(await site.Index(project.Id, false, null, default));
+        Assert.False(Assert.IsType<WbsIndexViewModel>(siteView.Model).CanViewArchived);
+        Assert.IsType<ForbidResult>(await site.Index(project.Id, true, null, default));
     }
 
     [Fact]
@@ -499,6 +707,25 @@ public sealed class WbsServiceTests : IAsyncLifetime
         Assert.False(phases[0].IsArchived);
         Assert.True(phases[3].IsArchived);
         Assert.Equal(ProjectPhaseStatus.NotStarted, phases[3].StatusBeforeArchive);
+    }
+
+    private WbsController CreateController(ApplicationUser user, params string[] roles)
+    {
+        var store = new UserStore<ApplicationUser, IdentityRole, ApplicationDbContext>(_db);
+        var userManager = new UserManager<ApplicationUser>(
+            store, Options.Create(new IdentityOptions()), new PasswordHasher<ApplicationUser>(),
+            [], [], new UpperInvariantLookupNormalizer(), new IdentityErrorDescriber(),
+            new ServiceCollection().BuildServiceProvider(), NullLogger<UserManager<ApplicationUser>>.Instance);
+        var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id) };
+        claims.AddRange(roles.Select(role => new Claim(ClaimTypes.Role, role)));
+        var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, "test"));
+        return new WbsController(_service, userManager)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = new DefaultHttpContext { User = principal }
+            }
+        };
     }
 
     private async Task<(ApplicationUser User, Project Project, ProjectPhase Phase)> CreateMemberAndPhaseAsync(

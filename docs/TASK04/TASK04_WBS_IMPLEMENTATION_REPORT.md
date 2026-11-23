@@ -24,6 +24,8 @@ Ba đặc tả được đối chiếu là các tài liệu tiếng Việt đã 
 - Client Representative chỉ truy cập dự án có `ClientName` khớp `OrganizationName` sau khi trim, không phân biệt hoa thường.
 - Không có vai trò hợp lệ thì từ chối mặc định. Admin có thể xem toàn hệ thống và Archive/Restore, nhưng không thể sửa cấu trúc hoặc trạng thái nghiệp vụ, kể cả khi tài khoản có thêm role khác.
 - Quyền dịch vụ được áp dụng lại ở mỗi thao tác; không chỉ dựa vào việc ẩn nút trên giao diện.
+- Form sửa kiểm tra quyền theo giai đoạn/hạng mục thực tế trước cả khi trả lỗi validation. Form tạo kiểm tra quyền sửa cấu trúc ở service, kể cả tài khoản nhiều role.
+- Trong dự án chỉ đọc, Admin/PD/PM vẫn có bộ lọc xem mục WBS đã lưu trữ; mọi nút lưu trữ/khôi phục và thao tác ghi vẫn bị khóa.
 
 | Chức năng | Vai trò được phép |
 |---|---|
@@ -128,8 +130,8 @@ dotnet test .\tests\ConstructionProjectManagement.Tests\ConstructionProjectManag
 
 1. Sao lưu database trước khi chạy phiên bản mới vì khởi tạo ứng dụng tự áp dụng migration.
 2. Khởi chạy ứng dụng và đăng nhập tài khoản thuộc một trong các vai trò được nêu trong ma trận.
-3. Mở `/Wbs` để chuyển tới dự án đầu tiên trong phạm vi hoặc mở `/Wbs?projectId=<ID>` cho dự án cụ thể.
-4. Với Project Director/Project Manager, thử tạo/sửa giai đoạn và WorkItem, đổi thứ tự, đổi mã, đổi cha rồi xác nhận cấp cây cập nhật.
+3. Mở `/Wbs` để xem các dự án trong phạm vi, tìm theo mã/tên dự án hoặc mã/tên hạng mục WBS và chọn **Chi tiết**. Có thể mở trực tiếp `/Wbs?projectId=<ID>` cho dự án cụ thể. Xem trước và tìm kiếm chỉ bao gồm các hạng mục chưa lưu trữ.
+4. Trong **Chi tiết**, với Project Director/Project Manager có quyền ghi, dùng **Thêm giai đoạn** hoặc **Thêm hạng mục WBS**; thử sửa, đổi thứ tự, đổi mã, đổi cha rồi xác nhận cấp cây cập nhật. Trang tổng quan chỉ có nút **Chi tiết** trên mỗi dự án.
 5. Với Site Manager, thử đổi trạng thái nhưng xác nhận không thể tạo/sửa cấu trúc.
 6. Với Admin/Project Director/Project Manager, bật “Hiển thị mục đã lưu trữ”, Archive rồi Restore một mục và kiểm tra trạng thái/Task liên kết.
 7. Thử mở URL của dự án mà user không là thành viên active, dự án hoàn thành/hủy hoặc dự án có ClientName không khớp tổ chức; server phải từ chối tương ứng.
